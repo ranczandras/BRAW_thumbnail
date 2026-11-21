@@ -45,8 +45,13 @@ static void UseMovieStyle(QLThumbnailReply *reply)
 
     QLThumbnailReply *reply = [QLThumbnailReply replyWithContextSize:size
                                                         drawingBlock:^BOOL(CGContextRef context) {
+        // Fill whatever area the context really has: its scale (Retina) isn't always applied
+        // to the coordinate system, and drawing in `size` then covered only a corner.
+        CGRect area = CGContextGetClipBoundingBox(context);
+        if (CGRectIsEmpty(area) || CGRectIsInfinite(area) || CGRectIsNull(area))
+            area = CGRectMake(0, 0, size.width, size.height);
         CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
-        CGContextDrawImage(context, CGRectMake(0, 0, size.width, size.height), (__bridge CGImageRef)image);
+        CGContextDrawImage(context, area, (__bridge CGImageRef)image);
         return YES;
     }];
     UseMovieStyle(reply);
