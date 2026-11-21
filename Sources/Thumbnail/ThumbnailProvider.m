@@ -1,11 +1,24 @@
 // Finder's icons for .braw clips: a frame about one second in, fitted to the size Finder asks for.
 
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
+#import <objc/message.h>
 
 #import "BRAWClip.h"
 
 @interface ThumbnailProvider : QLThumbnailProvider
 @end
+
+/// Without this, Finder draws the thumbnail as a document: a page with a folded corner and the
+/// picture shrunk inside. QLThumbnailReply has an undocumented `iconFlavor` (the flavors of the
+/// old Quick Look generators); 3 is the movie flavor that Finder uses for video files. Skipped
+/// if a future macOS drops it.
+static void UseMovieStyle(QLThumbnailReply *reply)
+{
+    const NSInteger movieFlavor = 3;
+    SEL setter = NSSelectorFromString(@"setIconFlavor:");
+    if ([reply respondsToSelector:setter])
+        ((void (*)(id, SEL, NSInteger))objc_msgSend)(reply, setter, movieFlavor);
+}
 
 @implementation ThumbnailProvider
 
@@ -36,7 +49,7 @@
         CGContextDrawImage(context, CGRectMake(0, 0, size.width, size.height), (__bridge CGImageRef)image);
         return YES;
     }];
-    reply.extensionBadge = @"BRAW";
+    UseMovieStyle(reply);
     handler(reply, nil);
 }
 
