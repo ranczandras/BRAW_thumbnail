@@ -233,8 +233,10 @@ static inline float SampleValue(const uint8_t *s, uint32_t bytes)
         const CFTimeInterval sinceStart = CACurrentMediaTime() - playHostTime;
         if (playerTime != nil && playerTime.sampleTimeValid && playerTime.sampleTime > 0)
             played = playerTime.sampleTime;
-        else if (sinceStart > 0.5)
-            played = sinceStart * _rate; // the sound isn't moving: follow the system clock instead
+        else if (sinceStart > 2.0)
+            played = sinceStart * _rate; // the sound never started: follow the system clock instead
+        // Otherwise the sound output is still starting up: hold at the start rather than run
+        // ahead on the system clock and jump back once the sound is heard.
     }
     return fmod(start + played, (double)_loopSamples) / _rate;
 }
@@ -265,6 +267,7 @@ typedef NS_ENUM(NSInteger, DecodeKind) {
     double _pausedSeconds;
     double _startSeconds;
     CFTimeInterval _startHostTime;
+    double _lastClock;          // -1: the clock may go anywhere next (after play or seek)
 
     // Playback thread only.
     double _averageDecode;
@@ -281,6 +284,7 @@ typedef NS_ENUM(NSInteger, DecodeKind) {
     _duration = MAX(clip.frameCount, 1) / _fps;
     _condition = [[NSCondition alloc] init];
     _seekTarget = -1;
+    _lastClock = -1;
     _lastShownFrame = frame;
     _pausedSeconds = frame / _fps;
     _playbackLongSide = 1280;
@@ -314,9 +318,14 @@ typedef NS_ENUM(NSInteger, DecodeKind) {
 {
     if (!_isPlaying)
         return _pausedSeconds;
-    if (_audio != nil)
-        return [_audio position];
-    return fmod(_startSeconds + (CACurrentMediaTime() - _startHostTime), _duration);
+    double now = _audio != nil ? [_audio position]
+                               : fmod(_startSeconds + (CACurrentMediaTime() - _startHostTime), _duration);
+    // Never step backwards by a little (that shows as the picture jumping back); a big step
+    // back is the loop starting over.
+    if (_lastClock >= 0 && now < _lastClock && _lastClock - now < _duration / 2)
+        now = _lastClock;
+    _lastClock = now;
+    return now;
 }
 
 - (void)notifyState
@@ -335,6 +344,7 @@ typedef NS_ENUM(NSInteger, DecodeKind) {
         _needsSharp = NO;
         _startSeconds = _pausedSeconds;
         _startHostTime = CACurrentMediaTime();
+        _lastClock = -1;
         [_audio playFrom:_pausedSeconds];
     }
     [_condition broadcast];
@@ -376,6 +386,7 @@ typedef NS_ENUM(NSInteger, DecodeKind) {
     if (_isPlaying) {
         _startSeconds = _pausedSeconds;
         _startHostTime = CACurrentMediaTime();
+        _lastClock = -1;
         [_audio playFrom:_pausedSeconds];
     } else {
         _seekTarget = (int64_t)frame;
