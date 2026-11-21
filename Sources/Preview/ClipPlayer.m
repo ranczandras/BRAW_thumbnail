@@ -70,6 +70,7 @@ static inline float SampleValue(const uint8_t *s, uint32_t bytes)
     os_unfair_lock _lock;
     uint64_t _segmentStart;
     BOOL _running;
+    BOOL _segmentPending;
     CFTimeInterval _playHostTime;
 }
 
@@ -173,18 +174,25 @@ static inline float SampleValue(const uint8_t *s, uint32_t bytes)
 
 - (void)playFrom:(double)seconds
 {
+    // The new position must count from right now: -position is read straight away, and until
+    // the queue got to it, it used to report the old segment (at first, the clip's very start),
+    // so the picture flashed a frame from there before jumping to where playback begins.
+    const uint64_t start = (uint64_t)llround(MAX(seconds, 0) * _rate) % _loopSamples;
+    os_unfair_lock_lock(&_lock);
+    _segmentStart = start;
+    _running = YES;
+    _playHostTime = CACurrentMediaTime();
+    _segmentPending = YES; // the node's time still belongs to the previous segment
+    os_unfair_lock_unlock(&_lock);
+
     dispatch_async(_queue, ^{
         self->_generation++;
         [self->_node stop];
         if (!self->_engine.isRunning)
             [self->_engine startAndReturnError:nil];
-
-        const uint64_t start = (uint64_t)llround(MAX(seconds, 0) * self->_rate) % self->_loopSamples;
         self->_nextSample = start;
         os_unfair_lock_lock(&self->_lock);
-        self->_segmentStart = start;
-        self->_running = YES;
-        self->_playHostTime = CACurrentMediaTime();
+        self->_segmentPending = NO;
         os_unfair_lock_unlock(&self->_lock);
 
         const NSUInteger generation = self->_generation;
@@ -223,18 +231,21 @@ static inline float SampleValue(const uint8_t *s, uint32_t bytes)
     os_unfair_lock_lock(&_lock);
     const uint64_t start = _segmentStart;
     const BOOL running = _running;
+    const BOOL pending = _segmentPending;
     const CFTimeInterval playHostTime = _playHostTime;
     os_unfair_lock_unlock(&_lock);
 
     double played = 0;
-    if (running) {
+    if (running && !pending) {
         AVAudioTime *nodeTime = _node.lastRenderTime;
         AVAudioTime *playerTime = nodeTime != nil ? [_node playerTimeForNodeTime:nodeTime] : nil;
         const CFTimeInterval sinceStart = CACurrentMediaTime() - playHostTime;
         if (playerTime != nil && playerTime.sampleTimeValid && playerTime.sampleTime > 0)
             played = playerTime.sampleTime;
-        else if (sinceStart > 0.5)
-            played = sinceStart * _rate; // the sound isn't moving: follow the system clock instead
+        else if (sinceStart > 2.0)
+            played = sinceStart * _rate; // the sound never started: follow the system clock instead
+        // Otherwise the sound output is still starting up: hold at the start rather than run
+        // ahead on the system clock and jump back once the sound is heard.
     }
     return fmod(start + played, (double)_loopSamples) / _rate;
 }
@@ -265,6 +276,7 @@ typedef NS_ENUM(NSInteger, DecodeKind) {
     double _pausedSeconds;
     double _startSeconds;
     CFTimeInterval _startHostTime;
+    double _lastClock;          // -1: the clock may go anywhere next (after play or seek)
 
     // Playback thread only.
     double _averageDecode;
@@ -281,6 +293,7 @@ typedef NS_ENUM(NSInteger, DecodeKind) {
     _duration = MAX(clip.frameCount, 1) / _fps;
     _condition = [[NSCondition alloc] init];
     _seekTarget = -1;
+    _lastClock = -1;
     _lastShownFrame = frame;
     _pausedSeconds = frame / _fps;
     _playbackLongSide = 1280;
@@ -314,9 +327,14 @@ typedef NS_ENUM(NSInteger, DecodeKind) {
 {
     if (!_isPlaying)
         return _pausedSeconds;
-    if (_audio != nil)
-        return [_audio position];
-    return fmod(_startSeconds + (CACurrentMediaTime() - _startHostTime), _duration);
+    double now = _audio != nil ? [_audio position]
+                               : fmod(_startSeconds + (CACurrentMediaTime() - _startHostTime), _duration);
+    // Never step backwards by a little (that shows as the picture jumping back); a big step
+    // back is the loop starting over.
+    if (_lastClock >= 0 && now < _lastClock && _lastClock - now < _duration / 2)
+        now = _lastClock;
+    _lastClock = now;
+    return now;
 }
 
 - (void)notifyState
@@ -335,6 +353,7 @@ typedef NS_ENUM(NSInteger, DecodeKind) {
         _needsSharp = NO;
         _startSeconds = _pausedSeconds;
         _startHostTime = CACurrentMediaTime();
+        _lastClock = -1;
         [_audio playFrom:_pausedSeconds];
     }
     [_condition broadcast];
@@ -376,6 +395,7 @@ typedef NS_ENUM(NSInteger, DecodeKind) {
     if (_isPlaying) {
         _startSeconds = _pausedSeconds;
         _startHostTime = CACurrentMediaTime();
+        _lastClock = -1;
         [_audio playFrom:_pausedSeconds];
     } else {
         _seekTarget = (int64_t)frame;
