@@ -61,11 +61,11 @@ step "Compiling (${ARCHS})"
 # Blackmagic's loader for BlackmagicRawAPI.framework, from the SDK itself.
 "$CXX" "${COMMON[@]}" "${EXTENSION[@]}" -std=c++17 -w -c "$BRAW_INCLUDE/BlackmagicRawAPIDispatch.cpp" -o "$OBJ/dispatch.o"
 "$CXX" "${COMMON[@]}" "${EXTENSION[@]}" -std=c++17 -isystem "$BRAW_INCLUDE" \
-    -c "$ROOT/Sources/Shared/BRAWDecoder.mm" -o "$OBJ/decoder.o"
-"$CC" "${COMMON[@]}" "${EXTENSION[@]}" -I "$ROOT/Sources/Shared" \
-    -c "$ROOT/Sources/Thumbnail/ThumbnailProvider.m" -o "$OBJ/thumbnail.o"
-"$CC" "${COMMON[@]}" "${EXTENSION[@]}" -I "$ROOT/Sources/Shared" \
-    -c "$ROOT/Sources/Preview/PreviewProvider.m" -o "$OBJ/preview.o"
+    -c "$ROOT/Sources/Shared/BRAWClip.mm" -o "$OBJ/clip.o"
+for source in Thumbnail/ThumbnailProvider Preview/ClipPlayer Preview/PreviewViewController; do
+    "$CC" "${COMMON[@]}" "${EXTENSION[@]}" -I "$ROOT/Sources/Shared" \
+        -c "$ROOT/Sources/$source.m" -o "$OBJ/$(basename "$source").o"
+done
 "$CC" "${COMMON[@]}" -c "$ROOT/Sources/App/main.m" -o "$OBJ/app.o"
 
 render_plist() { # template destination
@@ -74,16 +74,16 @@ render_plist() { # template destination
     plutil -lint -s "$2"
 }
 
-build_extension() { # executable-name object plist-template frameworks...
-    local name="$1" object="$2" template="$3"
-    shift 3
+build_extension() { # executable-name plist-template objects-and-frameworks...
+    local name="$1" template="$2"
+    shift 2
     local appex="$APP/Contents/PlugIns/$name.appex"
     step "Building $name.appex"
     mkdir -p "$appex/Contents/MacOS"
     render_plist "$template" "$appex/Contents/Info.plist"
     "$CXX" "${COMMON[@]}" "${EXTENSION[@]}" -Wl,-e,_NSExtensionMain \
-        "$object" "$OBJ/decoder.o" "$OBJ/dispatch.o" \
-        -framework Foundation -framework CoreFoundation -framework CoreGraphics "$@" \
+        "$@" "$OBJ/clip.o" "$OBJ/dispatch.o" \
+        -framework Foundation -framework CoreFoundation -framework CoreGraphics \
         -o "$appex/Contents/MacOS/$name"
     if [[ "$SKIP_FRAMEWORK" != 1 ]]; then
         # Each extension gets its own copy: the sandbox of a Quick Look extension can't load
@@ -100,8 +100,11 @@ render_plist "$ROOT/Resources/App-Info.plist" "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 "$CC" "${COMMON[@]}" "$OBJ/app.o" -framework Cocoa -o "$APP/Contents/MacOS/$APP_NAME"
 
-build_extension BRAWThumbnail "$OBJ/thumbnail.o" "$ROOT/Resources/Thumbnail-Info.plist" -framework QuickLookThumbnailing
-build_extension BRAWPreview "$OBJ/preview.o" "$ROOT/Resources/Preview-Info.plist" -framework QuickLookUI
+build_extension BRAWThumbnail "$ROOT/Resources/Thumbnail-Info.plist" \
+    "$OBJ/ThumbnailProvider.o" -framework QuickLookThumbnailing
+build_extension BRAWPreview "$ROOT/Resources/Preview-Info.plist" \
+    "$OBJ/PreviewViewController.o" "$OBJ/ClipPlayer.o" \
+    -framework QuickLookUI -framework AppKit -framework AVFoundation -framework QuartzCore
 
 step "Signing (identity: $SIGN_ID)"
 # codesign refuses files carrying Finder info or resource forks.

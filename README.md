@@ -3,9 +3,17 @@
 Bélyegképek és Gyorsnézet-előnézet **Blackmagic RAW (`.braw`)** klipekhez a macOS Finderben.
 
 - **Bélyegkép** a Finder ikon-, lista-, oszlop- és galérianézetében (a klip kb. 1. másodpercéből).
-- **Gyorsnézet** szóközzel: éles állókép, címsorban felbontás · fps · hossz · kameratípus.
-- A log felvételek (Blackmagic Design Film) is „rendes” képként látszanak: a bélyegkép
-  Extended Video / Rec.709 kinézettel készül, ahogy a kamera monitorján.
+- **Lejátszás szóközzel**: a Gyorsnézet-ablakban a klip azonnal elindul, hanggal, ismétlődve.
+  Kattintás a képre (vagy a ▶︎ gombra): szünet / folytatás; a csúszkával lehet tekerni.
+  Szünetben élesebb állókép jelenik meg. A Finder keskeny előnézeti paneljén állókép marad,
+  kattintásra indul.
+- **Kinézet** (bélyegképen és lejátszáskor ugyanaz):
+  - ha a klipben van LUT (a kamera beágyazta), azt használja;
+  - ha nincs, és a felvétel log (Blackmagic Design Film), Extended Video / Rec.709 kinézetre
+    alakítja, ahogy a kamera monitorján látszik;
+  - minden más (Video, Extended Video, egyedi görbe) úgy jelenik meg, ahogy felvették.
+
+  A lejátszó felső sorában látszik, melyik történt (pl. `LUT: …` vagy `Film → Extended Video`).
 
 *English summary: Finder thumbnails and Quick Look previews for Blackmagic RAW clips. Run
 `./install.sh` on a Mac that has the free Blackmagic RAW package installed.*
@@ -77,6 +85,9 @@ bash uninstall.sh
   `BRAWThumbnail.appex` (`QLThumbnailProvider`) és `BRAWPreview.appex` (`QLPreviewProvider`).
 - A dekódolás a Blackmagic RAW SDK-val történik CPU-n, a kért mérethez illő csökkentett
   felbontáson (1/8, 1/4, 1/2), így egy bélyegkép tört másodperc alatt kész.
+- Lejátszáskor a képkockák menet közben dekódolódnak (6K-nál 1/4, 12K-nál 1/8 felbontáson), az
+  óra a klip saját hangja, így kép és hang szinkronban marad. Ha a gép nem bírja a tempót, a
+  lejátszó magától kisebb felbontásra vált, és inkább kockát ejt, mint hogy lemaradjon.
 - A `BlackmagicRawAPI.framework` a gépedre telepített Blackmagic RAW-ból kerül a bővítményekbe a
   telepítéskor – a repó nem tartalmazza és nem terjeszti. A fordítás ugyanannak az SDK-nak a
   fejlécével történik, így a verziók mindig egyeznek.
