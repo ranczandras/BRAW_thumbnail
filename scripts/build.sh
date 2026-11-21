@@ -60,7 +60,9 @@ mkdir -p "$OBJ"
 step "Compiling (${ARCHS})"
 # Blackmagic's loader for BlackmagicRawAPI.framework, from the SDK itself.
 "$CXX" "${COMMON[@]}" "${EXTENSION[@]}" -std=c++17 -w -c "$BRAW_INCLUDE/BlackmagicRawAPIDispatch.cpp" -o "$OBJ/dispatch.o"
-"$CXX" "${COMMON[@]}" "${EXTENSION[@]}" -std=c++17 -isystem "$BRAW_INCLUDE" \
+# -nostdinc++: our code needs no C++ standard library headers, which some Command Line Tools
+# installs lack (often after a macOS upgrade). This keeps it that way.
+"$CXX" "${COMMON[@]}" "${EXTENSION[@]}" -std=c++17 -nostdinc++ -isystem "$BRAW_INCLUDE" \
     -c "$ROOT/Sources/Shared/BRAWClip.mm" -o "$OBJ/clip.o"
 for source in Thumbnail/ThumbnailProvider Preview/ClipPlayer Preview/PreviewViewController; do
     "$CC" "${COMMON[@]}" "${EXTENSION[@]}" -I "$ROOT/Sources/Shared" \
