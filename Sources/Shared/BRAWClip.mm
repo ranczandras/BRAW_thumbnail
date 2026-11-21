@@ -6,14 +6,14 @@
 class IBlackmagicRawAudioBuffer;
 #include "BlackmagicRawAPI.h"
 
+#import <os/lock.h>
 #import <os/log.h>
 
-#include <algorithm>
-#include <atomic>
-#include <cmath>
-#include <cstring>
-#include <mutex>
-#include <vector>
+// Only C headers here, no C++ standard library: some Command Line Tools installs (often left
+// behind by a macOS upgrade) lack the libc++ headers, and this must still build there.
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
 
 NSErrorDomain const BRAWErrorDomain = @"BRAWErrorDomain";
 
@@ -39,14 +39,14 @@ namespace {
 /// thread waiting for it and the SDK callback; whichever lets go last deletes it, so a decode
 /// that outlives a timeout can't write into freed memory.
 struct FrameRequest {
-    std::atomic<int> references{2};
+    int references = 2; // changed atomically
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     BlackmagicRawResolutionScale scale = blackmagicRawResolutionScaleFull;
     IBlackmagicRawClipProcessingAttributes *clipAttributes = nullptr; // one reference held
     HRESULT result = E_FAIL;
     uint32_t width = 0;
     uint32_t height = 0;
-    std::vector<uint8_t> pixels; // RGBA, 8 bits per channel, rows of width * 4 bytes
+    NSData *pixels = nil; // RGBA, 8 bits per channel, rows of width * 4 bytes
 
     ~FrameRequest()
     {
@@ -56,7 +56,7 @@ struct FrameRequest {
 
     void Release()
     {
-        if (references.fetch_sub(1) == 1)
+        if (__atomic_sub_fetch(&references, 1, __ATOMIC_ACQ_REL) == 0)
             delete this;
     }
 
@@ -153,7 +153,7 @@ public:
                 result = E_FAIL;
             if (SUCCEEDED(result)) {
                 const uint8_t *bytes = static_cast<const uint8_t *>(resource);
-                request->pixels.assign(bytes, bytes + needed);
+                request->pixels = [NSData dataWithBytes:bytes length:needed];
                 request->width = width;
                 request->height = height;
             }
@@ -175,8 +175,8 @@ public:
         if (object == nullptr)
             return E_POINTER;
         const CFUUIDBytes unknown = CFUUIDGetUUIDBytes(IUnknownUUID);
-        if (std::memcmp(&iid, &IID_IBlackmagicRawCallback, sizeof(CFUUIDBytes)) == 0 ||
-            std::memcmp(&iid, &unknown, sizeof(CFUUIDBytes)) == 0) {
+        if (memcmp(&iid, &IID_IBlackmagicRawCallback, sizeof(CFUUIDBytes)) == 0 ||
+            memcmp(&iid, &unknown, sizeof(CFUUIDBytes)) == 0) {
             *object = this;
             return S_OK;
         }
@@ -189,12 +189,12 @@ public:
     virtual ULONG STDMETHODCALLTYPE Release(void) { return 1; }
 };
 
-std::mutex gCodecMutex;
+os_unfair_lock gCodecLock = OS_UNFAIR_LOCK_INIT;
 IBlackmagicRawFactory *gFactory = nullptr;
 IBlackmagicRaw *gCodec = nullptr;
 Callback gCallback;
 
-/// Loads the SDK (once). Must be called with gCodecMutex held.
+/// Loads the SDK (once). Must be called with gCodecLock held.
 HRESULT StartCodec()
 {
     if (gCodec != nullptr)
@@ -252,19 +252,23 @@ NSArray<NSString *> *OfferedValues(IBlackmagicRawClipProcessingAttributes *attri
     if (FAILED(attributes->GetClipAttributeList(attribute, nullptr, &count, &readOnly)) || count == 0 || readOnly)
         return @[];
 
-    std::vector<Variant> values(count);
-    for (Variant &value : values)
-        VariantInit(&value);
+    Variant *values = (Variant *)calloc(count, sizeof(Variant));
+    if (values == nullptr)
+        return @[];
+    const uint32_t allocated = count;
+    for (uint32_t i = 0; i < allocated; i++)
+        VariantInit(&values[i]);
 
     NSMutableArray<NSString *> *names = [NSMutableArray array];
-    if (SUCCEEDED(attributes->GetClipAttributeList(attribute, values.data(), &count, &readOnly))) {
-        for (uint32_t i = 0; i < count && i < values.size(); i++) {
+    if (SUCCEEDED(attributes->GetClipAttributeList(attribute, values, &count, &readOnly))) {
+        for (uint32_t i = 0; i < count && i < allocated; i++) {
             if (values[i].vt == blackmagicRawVariantTypeString && values[i].bstrVal != nullptr)
                 [names addObject:[(__bridge NSString *)values[i].bstrVal copy]];
         }
     }
-    for (Variant &value : values)
-        VariantClear(&value);
+    for (uint32_t i = 0; i < allocated; i++)
+        VariantClear(&values[i]);
+    free(values);
     return names;
 }
 
@@ -360,8 +364,9 @@ BlackmagicRawResolutionScale ScaleFor(uint32_t clipLongSide, CGFloat wanted)
 
 CGImageRef CreateImage(const FrameRequest &request)
 {
-    CFDataRef data = CFDataCreate(kCFAllocatorDefault, request.pixels.data(), (CFIndex)request.pixels.size());
-    CGDataProviderRef provider = data != nullptr ? CGDataProviderCreateWithCFData(data) : nullptr;
+    if (request.pixels == nil)
+        return nullptr;
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)request.pixels);
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceITUR_709);
     CGImageRef image = nullptr;
     if (provider != nullptr && space != nullptr)
@@ -370,8 +375,6 @@ CGImageRef CreateImage(const FrameRequest &request)
                               kCGRenderingIntentDefault);
     CGColorSpaceRelease(space);
     CGDataProviderRelease(provider);
-    if (data != nullptr)
-        CFRelease(data);
     return image;
 }
 
@@ -381,22 +384,23 @@ CGImageRef CreateImage(const FrameRequest &request)
     IBlackmagicRawClip *_clip;
     IBlackmagicRawClipProcessingAttributes *_attributes;
     IBlackmagicRawClipAudio *_audio;
-    std::mutex _audioMutex;
+    os_unfair_lock _audioLock;
 }
 
 + (nullable instancetype)clipWithURL:(NSURL *)url error:(NSError **)error
 {
     IBlackmagicRawClip *clip = nullptr;
     HRESULT result;
-    {
-        std::lock_guard<std::mutex> lock(gCodecMutex);
-        result = StartCodec();
-        if (FAILED(result)) {
-            if (error)
-                *error = BRAWMakeError(1, @"The Blackmagic RAW decoder could not be loaded. Run install.sh again.", result);
-            return nil;
-        }
+    os_unfair_lock_lock(&gCodecLock);
+    result = StartCodec();
+    const BOOL started = SUCCEEDED(result);
+    if (started)
         result = gCodec->OpenClip((__bridge CFStringRef)url.path, &clip);
+    os_unfair_lock_unlock(&gCodecLock);
+    if (!started) {
+        if (error)
+            *error = BRAWMakeError(1, @"The Blackmagic RAW decoder could not be loaded. Run the installer again.", result);
+        return nil;
     }
     if (FAILED(result) || clip == nullptr) {
         if (error)
@@ -414,15 +418,16 @@ CGImageRef CreateImage(const FrameRequest &request)
     }
     _clip = clip;
     _url = [url copy];
+    _audioLock = OS_UNFAIR_LOCK_INIT;
 
     float frameRate = 0;
     clip->GetWidth(&_width);
     clip->GetHeight(&_height);
     clip->GetFrameRate(&frameRate);
     clip->GetFrameCount(&_frameCount);
-    _frameRate = (std::isfinite(frameRate) && frameRate > 0 && frameRate < 10000) ? frameRate : 0;
+    _frameRate = (isfinite(frameRate) && frameRate > 0 && frameRate < 10000) ? frameRate : 0;
     _cameraType = CameraType(clip);
-    _posterFrameIndex = _frameCount > 0 ? std::min<uint64_t>((uint64_t)std::llround(_frameRate), _frameCount - 1) : 0;
+    _posterFrameIndex = _frameCount > 0 ? MIN((uint64_t)llround(_frameRate), _frameCount - 1) : 0;
 
     _lookDescription = @"";
     if (SUCCEEDED(clip->CloneClipProcessingAttributes(&_attributes)) && _attributes != nullptr)
@@ -470,12 +475,12 @@ CGImageRef CreateImage(const FrameRequest &request)
             *error = BRAWMakeError(3, [NSString stringWithFormat:@"%@ has no frames.", _url.lastPathComponent], E_FAIL);
         return nil;
     }
-    frameIndex = std::min(frameIndex, _frameCount - 1);
+    frameIndex = MIN(frameIndex, _frameCount - 1);
 
     dispatch_semaphore_wait(DecodeSlots(), DISPATCH_TIME_FOREVER);
 
     FrameRequest *request = new FrameRequest();
-    request->scale = ScaleFor(std::max(_width, _height), minimumLongSide);
+    request->scale = ScaleFor(MAX(_width, _height), minimumLongSide);
     if (_attributes != nullptr) {
         _attributes->AddRef();
         request->clipAttributes = _attributes;
@@ -520,18 +525,20 @@ CGImageRef CreateImage(const FrameRequest &request)
     if (_audio == nullptr || _audioChannelCount == 0 || sampleFrame >= _audioSampleCount)
         return 0;
     const uint32_t frameBytes = _audioChannelCount * (_audioBitDepth / 8);
-    maxFrames = std::min(maxFrames, bufferSize / frameBytes);
+    maxFrames = MIN(maxFrames, bufferSize / frameBytes);
     if (maxFrames == 0)
         return 0;
 
     uint32_t samplesRead = 0;
     uint32_t bytesRead = 0;
-    std::lock_guard<std::mutex> lock(_audioMutex);
-    if (FAILED(_audio->GetAudioSamples((int64_t)sampleFrame, buffer, bufferSize, maxFrames, &samplesRead, &bytesRead)))
+    os_unfair_lock_lock(&_audioLock);
+    const HRESULT result = _audio->GetAudioSamples((int64_t)sampleFrame, buffer, bufferSize, maxFrames, &samplesRead, &bytesRead);
+    os_unfair_lock_unlock(&_audioLock);
+    if (FAILED(result))
         return 0;
     if (bytesRead > 0)
-        samplesRead = std::min(samplesRead, bytesRead / frameBytes);
-    return std::min(samplesRead, maxFrames);
+        samplesRead = MIN(samplesRead, bytesRead / frameBytes);
+    return MIN(samplesRead, maxFrames);
 }
 
 @end
