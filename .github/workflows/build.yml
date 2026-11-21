@@ -31,7 +31,7 @@ jobs:
             -o "$RUNNER_TEMP/braw/Include/BlackmagicRawAPIDispatch.cpp"
 
       - name: Shell syntax
-        run: bash -n install.sh uninstall.sh scripts/build.sh scripts/doctor.sh
+        run: bash -n install.sh get.sh uninstall.sh scripts/build.sh scripts/doctor.sh
 
       - name: Build (universal, no framework)
         env:
