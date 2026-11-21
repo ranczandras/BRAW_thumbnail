@@ -70,6 +70,7 @@ static inline float SampleValue(const uint8_t *s, uint32_t bytes)
     os_unfair_lock _lock;
     uint64_t _segmentStart;
     BOOL _running;
+    BOOL _segmentPending;
     CFTimeInterval _playHostTime;
 }
 
@@ -173,18 +174,25 @@ static inline float SampleValue(const uint8_t *s, uint32_t bytes)
 
 - (void)playFrom:(double)seconds
 {
+    // The new position must count from right now: -position is read straight away, and until
+    // the queue got to it, it used to report the old segment (at first, the clip's very start),
+    // so the picture flashed a frame from there before jumping to where playback begins.
+    const uint64_t start = (uint64_t)llround(MAX(seconds, 0) * _rate) % _loopSamples;
+    os_unfair_lock_lock(&_lock);
+    _segmentStart = start;
+    _running = YES;
+    _playHostTime = CACurrentMediaTime();
+    _segmentPending = YES; // the node's time still belongs to the previous segment
+    os_unfair_lock_unlock(&_lock);
+
     dispatch_async(_queue, ^{
         self->_generation++;
         [self->_node stop];
         if (!self->_engine.isRunning)
             [self->_engine startAndReturnError:nil];
-
-        const uint64_t start = (uint64_t)llround(MAX(seconds, 0) * self->_rate) % self->_loopSamples;
         self->_nextSample = start;
         os_unfair_lock_lock(&self->_lock);
-        self->_segmentStart = start;
-        self->_running = YES;
-        self->_playHostTime = CACurrentMediaTime();
+        self->_segmentPending = NO;
         os_unfair_lock_unlock(&self->_lock);
 
         const NSUInteger generation = self->_generation;
@@ -223,11 +231,12 @@ static inline float SampleValue(const uint8_t *s, uint32_t bytes)
     os_unfair_lock_lock(&_lock);
     const uint64_t start = _segmentStart;
     const BOOL running = _running;
+    const BOOL pending = _segmentPending;
     const CFTimeInterval playHostTime = _playHostTime;
     os_unfair_lock_unlock(&_lock);
 
     double played = 0;
-    if (running) {
+    if (running && !pending) {
         AVAudioTime *nodeTime = _node.lastRenderTime;
         AVAudioTime *playerTime = nodeTime != nil ? [_node playerTimeForNodeTime:nodeTime] : nil;
         const CFTimeInterval sinceStart = CACurrentMediaTime() - playHostTime;
