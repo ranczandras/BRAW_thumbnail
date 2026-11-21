@@ -1,0 +1,54 @@
+# Compile check on a real Mac. The Blackmagic RAW SDK can't be downloaded here (Blackmagic asks
+# for a registration form), so this builds against copies of its permissively licensed headers
+# from public repositories, in an SDK 4/5 and an SDK 6 flavour, without embedding the framework.
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: sdk-2025
+            header: https://raw.githubusercontent.com/pomeloFellow/AutoSlate/f80411d85b3a5a7150d8d8a1c8e4bb6588ee12bf/blackmagic_sdk/macos/Include/BlackmagicRawAPI.h
+          - name: sdk-6
+            header: https://raw.githubusercontent.com/OpenUTV/utv/1aff9974548e46d5f6adc14323bd98371b61986c/cmake/dependencies/braw_sdk/Mac/include/BlackmagicRawAPI.h
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch Blackmagic RAW SDK headers
+        run: |
+          mkdir -p "$RUNNER_TEMP/braw/Include"
+          curl -fsSL "${{ matrix.header }}" -o "$RUNNER_TEMP/braw/Include/BlackmagicRawAPI.h"
+          curl -fsSL https://raw.githubusercontent.com/pomeloFellow/AutoSlate/f80411d85b3a5a7150d8d8a1c8e4bb6588ee12bf/blackmagic_sdk/macos/Include/BlackmagicRawAPIDispatch.cpp \
+            -o "$RUNNER_TEMP/braw/Include/BlackmagicRawAPIDispatch.cpp"
+
+      - name: Shell syntax
+        run: bash -n install.sh uninstall.sh scripts/build.sh scripts/doctor.sh
+
+      - name: Build (universal, no framework)
+        env:
+          BRAW_INCLUDE: ${{ runner.temp }}/braw/Include
+          SKIP_FRAMEWORK: "1"
+          ARCHS: arm64 x86_64
+        run: ./scripts/build.sh "$RUNNER_TEMP/out"
+
+      - name: Inspect bundle
+        run: |
+          app="$RUNNER_TEMP/out/BRAW Preview.app"
+          find "$app" -maxdepth 4 | sort
+          for plist in "$app/Contents/Info.plist" "$app"/Contents/PlugIns/*.appex/Contents/Info.plist; do
+            plutil -lint "$plist"
+          done
+          for appex in "$app"/Contents/PlugIns/*.appex; do
+            codesign -d --entitlements - "$appex"
+            lipo -info "$appex/Contents/MacOS/"*
+          done
+          codesign --verify --deep --strict --verbose=2 "$app"
