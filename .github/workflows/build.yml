@@ -21,7 +21,7 @@ jobs:
             header: https://raw.githubusercontent.com/OpenUTV/utv/1aff9974548e46d5f6adc14323bd98371b61986c/cmake/dependencies/braw_sdk/Mac/include/BlackmagicRawAPI.h
     name: ${{ matrix.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Fetch Blackmagic RAW SDK headers
         run: |
