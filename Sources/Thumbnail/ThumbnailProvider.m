@@ -2,7 +2,7 @@
 
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
 
-#import "BRAWDecoder.h"
+#import "BRAWClip.h"
 
 @interface ThumbnailProvider : QLThumbnailProvider
 @end
@@ -16,16 +16,16 @@
     const CGFloat wanted = MAX(box.width, box.height) * MAX(request.scale, 1.0);
 
     NSError *error = nil;
-    BRAWPoster *poster = [BRAWDecoder posterForURL:request.fileURL minimumLongSide:wanted error:&error];
-    if (poster == nil) {
+    BRAWClip *clip = [BRAWClip clipWithURL:request.fileURL error:&error];
+    CGImageRef decoded = clip ? [clip decodeFrame:clip.posterFrameIndex minimumLongSide:wanted error:&error] : NULL;
+    if (decoded == NULL) {
         handler(nil, error);
         return;
     }
+    id image = CFBridgingRelease(decoded); // keeps the image alive inside the drawing block
 
     // Fit the frame into the requested box, keeping its aspect ratio.
-    const CGFloat imageWidth = CGImageGetWidth(poster.image);
-    const CGFloat imageHeight = MAX(CGImageGetHeight(poster.image), 1);
-    const CGFloat ratio = imageWidth / imageHeight;
+    const CGFloat ratio = (CGFloat)CGImageGetWidth(decoded) / MAX(CGImageGetHeight(decoded), 1);
     CGSize size = ratio >= box.width / MAX(box.height, 1) ? CGSizeMake(box.width, box.width / ratio)
                                                            : CGSizeMake(box.height * ratio, box.height);
     size = CGSizeMake(MAX(round(size.width), 1), MAX(round(size.height), 1));
@@ -33,7 +33,7 @@
     QLThumbnailReply *reply = [QLThumbnailReply replyWithContextSize:size
                                                         drawingBlock:^BOOL(CGContextRef context) {
         CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
-        CGContextDrawImage(context, CGRectMake(0, 0, size.width, size.height), poster.image);
+        CGContextDrawImage(context, CGRectMake(0, 0, size.width, size.height), (__bridge CGImageRef)image);
         return YES;
     }];
     reply.extensionBadge = @"BRAW";
